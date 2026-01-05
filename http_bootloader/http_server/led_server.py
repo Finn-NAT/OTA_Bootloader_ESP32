@@ -4,9 +4,9 @@ import os
 import json
 import queue
 from dataclasses import dataclass
+import threading
+import time
 from typing import Iterator
-
-from flask import Flask, jsonify, render_template, request, Response
 
 from flask import Flask, jsonify, render_template, request, Response
 
@@ -15,11 +15,44 @@ from flask import Flask, jsonify, render_template, request, Response
 class LedState:
     on: bool = False
     last_count: int | None = None
+    last_seen: float | None = None
+    last_status: dict | None = None
 
 
 def create_app() -> Flask:
     app = Flask(__name__)
     state = LedState(on=False)
+
+    # Heartbeat rules: if no heartbeat within this window, UI should show offline.
+    HEARTBEAT_TIMEOUT_S = 5.0
+
+    def _is_online() -> bool:
+        return state.last_seen is not None and (time.time() - state.last_seen) <= HEARTBEAT_TIMEOUT_S
+
+    def _watchdog() -> None:
+        """Periodically checks heartbeat age and broadcasts online/offline transitions."""
+        last = _is_online()
+        while True:
+            time.sleep(1.0)
+            cur = _is_online()
+            if cur != last:
+                last = cur
+                if not cur:
+                    # When offline, force nested status.bootloader_status = -1
+                    if state.last_status is None:
+                        state.last_status = {}
+                    state.last_status["bootloader_status"] = -1
+                _broadcast(
+                    "status",
+                    {
+                        "online": cur,
+                        "last_seen": state.last_seen,
+                        "timeout_s": HEARTBEAT_TIMEOUT_S,
+                        "status": state.last_status,
+                    },
+                )
+
+    threading.Thread(target=_watchdog, daemon=True).start()
 
     # Each connected browser gets its own queue.
     subscribers: set[queue.Queue[str]] = set()
@@ -68,6 +101,51 @@ def create_app() -> Flask:
         return render_template("led.html")
 
 
+    @app.post("/status")
+    def post_status():
+        """Heartbeat endpoint.
+
+        ESP32 can POST JSON like:
+          {"status":"ok"} or {"status":"running","uptime_ms":1234}
+
+        We'll store last_seen and broadcast to SSE clients.
+        """
+        data = request.get_json(silent=True) or {}
+        state.last_seen = time.time()
+        # Keep the payload under nested 'status' only.
+        # ESP32 should send: {"bootloader_status": 0/1}
+        state.last_status = data
+
+        _broadcast(
+            "status",
+            {
+                "online": True,
+                "last_seen": state.last_seen,
+                "status": data,
+            },
+        )
+        return jsonify({"ok": True})
+
+    @app.get("/status")
+    def get_status():
+        now = time.time()
+        online = state.last_seen is not None and (now - state.last_seen) <= HEARTBEAT_TIMEOUT_S
+
+        # When offline, force nested status.bootloader_status = -1.
+        status_payload = dict(state.last_status or {})
+        if not online:
+            status_payload["bootloader_status"] = -1
+        return jsonify(
+            {
+                "ok": True,
+                "online": online,
+                "last_seen": state.last_seen,
+                "timeout_s": HEARTBEAT_TIMEOUT_S,
+                "status": status_payload,
+            }
+        )
+
+
     @app.post("/count")
     def count():
         # Accept JSON: {"count": 123}
@@ -97,7 +175,7 @@ def create_app() -> Flask:
         # Send initial snapshot so UI can render immediately.
         q.put_nowait(
             "event: snapshot\n"
-            f"data: {json.dumps({'on': state.on, 'last_count': state.last_count}, ensure_ascii=False)}\n\n"
+            f"data: {json.dumps({'on': state.on, 'last_count': state.last_count, 'online': _is_online(), 'last_seen': state.last_seen, 'timeout_s': HEARTBEAT_TIMEOUT_S, 'status': (dict(state.last_status or {}) if _is_online() else dict({**(state.last_status or {}), 'bootloader_status': -1}))}, ensure_ascii=False)}\n\n"
         )
 
         def gen() -> Iterator[str]:

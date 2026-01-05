@@ -2,10 +2,14 @@ menu "Example Configuration"
 
     config EXAMPLE_FIRMWARE_UPGRADE_URL
         string "firmware upgrade url endpoint"
-        default "http://192.168.5.95:8070/led"
+        default "http://192.168.5.83:8070"
         help
-            URL of server which hosts the firmware
-            image.
+            Base URL of the server.
+            Format: http://<ip>:<port>
+
+            This project appends endpoints in firmware code:
+              - GET  <base>/led   (expects: on/off)
+              - POST <base>/count (sends: {"count": N})
 
     config EXAMPLE_USE_CERT_BUNDLE
         bool "Enable certificate bundle"

@@ -16,6 +16,10 @@
       button:disabled { opacity:0.6; cursor:not-allowed; }
       .small { opacity:0.85; font-size: 0.95rem; }
       .status { white-space: pre-wrap; background:#0b1220; border:1px solid #22304d; border-radius:10px; padding:12px; margin-top:12px; }
+
+      .pill { padding: .2rem .6rem; border-radius: 999px; display: inline-block; border: 1px solid #22304d; }
+      .on { background: #123b2a; color: #98f5c1; }
+      .off { background: #3b1220; color: #ffb4b4; }
     </style>
   </head>
   <body>
@@ -23,6 +27,20 @@
       <h1>{{ title }}</h1>
       <div class="card">
         <p>{{ message }}</p>
+
+        <hr style="border:0; border-top:1px solid #22304d; margin:16px 0;" />
+
+        <h2 style="margin: 0 0 8px; font-size: 1.2rem">ESP32 connection</h2>
+        <div class="row">
+          <div>Connection:</div>
+          <div id="conn" class="pill off">unknown</div>
+          <div id="connDetail" class="small"></div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>bootloader_status:</div>
+          <div id="bl" class="pill">-</div>
+          <div class="small">(-1 = disconnected)</div>
+        </div>
 
         <hr style="border:0; border-top:1px solid #22304d; margin:16px 0;" />
 
@@ -46,6 +64,45 @@
       function showStatus(text) {
         statusEl.style.display = 'block';
         statusEl.textContent = text;
+      }
+
+      function renderConn(online, lastSeen, timeoutS) {
+        const el = document.getElementById('conn');
+        const detail = document.getElementById('connDetail');
+
+        const isOnline = !!online;
+        el.textContent = isOnline ? 'online' : 'offline';
+        el.classList.toggle('on', isOnline);
+        el.classList.toggle('off', !isOnline);
+
+        if (!lastSeen) {
+          detail.textContent = '';
+          return;
+        }
+        const ageS = Math.max(0, (Date.now() / 1000) - Number(lastSeen));
+        const t = (timeoutS === null || timeoutS === undefined) ? '' : ` (timeout ${timeoutS}s)`;
+        detail.textContent = `last seen ${ageS.toFixed(1)}s ago${t}`;
+      }
+
+      function renderBootloaderStatus(v) {
+        const el = document.getElementById('bl');
+        el.textContent = (v === null || v === undefined) ? '-' : String(v);
+      }
+
+      function applyStatusPayload(p) {
+        if (!p) return;
+        renderConn(p.online, p.last_seen, p.timeout_s);
+        renderBootloaderStatus(p.status ? p.status.bootloader_status : undefined);
+      }
+
+      async function refreshStatus() {
+        try {
+          const rs = await fetch('/status', { cache: 'no-store' });
+          const js = await rs.json();
+          applyStatusPayload(js);
+        } catch (e) {
+          // ignore
+        }
       }
 
       form.addEventListener('submit', async (e) => {
@@ -82,6 +139,27 @@
           btn.disabled = false;
         }
       });
+
+      // SSE realtime updates for status
+      try {
+        const es = new EventSource('/events');
+        es.addEventListener('snapshot', (ev) => {
+          const data = JSON.parse(ev.data);
+          applyStatusPayload(data);
+        });
+        es.addEventListener('status', (ev) => {
+          const data = JSON.parse(ev.data);
+          applyStatusPayload(data);
+        });
+        es.onerror = () => {
+          // If SSE drops, fallback to polling.
+        };
+      } catch (e) {
+        // ignore
+      }
+
+      refreshStatus();
+      setInterval(refreshStatus, 2000);
     </script>
   </body>
 </html>

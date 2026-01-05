@@ -41,17 +41,144 @@ static const char *TAG = "http_led";
 #error "CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL is not set. Please configure it in menuconfig."
 #endif
 
-#define EXAMPLE_POLL_PERIOD_MS 2000
-
-/* Optional: send an incrementing counter to server every second.
- * Default endpoint: same host as CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL but path should be /count.
- * Example: http://192.168.5.83:8070/count
- */
-#ifndef EXAMPLE_COUNT_URL
-#define EXAMPLE_COUNT_URL "http://192.168.5.95:8070/count"
-#endif
+#define EXAMPLE_POLL_PERIOD_MS 1000
 
 #define EXAMPLE_COUNT_PERIOD_MS 1000
+
+#define EXAMPLE_STATUS_PERIOD_MS 500
+
+/* This project treats CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL as a *base URL*:
+ *   http://<ip>:<port>
+ * Endpoints are appended in code:
+ *   GET  <base>/led
+ *   POST <base>/count
+ */
+
+#define EXAMPLE_LED_PATH "/led"
+#define EXAMPLE_COUNT_PATH "/count"
+#define EXAMPLE_STATUS_PATH "/status"
+
+/* Bootloader/app status endpoint. If you want a different path, change it here. */
+#define BOOTLOADER_STATUS_PATH EXAMPLE_STATUS_PATH
+
+static void build_url(char *out, size_t out_size, const char *base, const char *path)
+{
+	if (out == NULL || out_size == 0) {
+		return;
+	}
+	out[0] = 0;
+	if (base == NULL || path == NULL) {
+		return;
+	}
+
+	size_t blen = strlen(base);
+	bool base_has_slash = (blen > 0 && base[blen - 1] == '/');
+	bool path_has_slash = (path[0] == '/');
+
+	if (base_has_slash && path_has_slash) {
+		/* avoid double slash */
+		snprintf(out, out_size, "%.*s%s", (int)(blen - 1), base, path);
+	} else if (!base_has_slash && !path_has_slash) {
+		/* ensure single slash */
+		snprintf(out, out_size, "%s/%s", base, path);
+	} else {
+		snprintf(out, out_size, "%s%s", base, path);
+	}
+}
+
+typedef enum {
+	OTA_BOOTLOADER_ERROR = -1,
+	OTA_BOOTLOADER_RUNNING = 0,
+	OTA_FIRMWARE_RUNNING = 1,
+} ota_bootloader_state_t;
+
+static esp_err_t http_post_status(const char *url, ota_bootloader_state_t status, int *out_status)
+{
+	if (url == NULL || url[0] == '\0') {
+		return ESP_ERR_INVALID_ARG;
+	}
+
+	char body[64];
+	snprintf(body, sizeof(body), "{\"bootloader_status\":%u}", (unsigned)status);
+
+	esp_http_client_config_t cfg = {
+		.url = url,
+		.timeout_ms = 10000,
+		.keep_alive_enable = true,
+		.disable_auto_redirect = false,
+	};
+
+	esp_http_client_handle_t client = esp_http_client_init(&cfg);
+	if (client == NULL) {
+		return ESP_FAIL;
+	}
+
+	esp_err_t err = esp_http_client_set_method(client, HTTP_METHOD_POST);
+	if (err != ESP_OK) {
+		esp_http_client_cleanup(client);
+		return err;
+	}
+
+	(void)esp_http_client_set_header(client, "Content-Type", "application/json");
+	err = esp_http_client_set_post_field(client, body, (int)strlen(body));
+	if (err != ESP_OK) {
+		esp_http_client_cleanup(client);
+		return err;
+	}
+
+	/* Open with write_len so the library knows how much we're sending */
+	err = esp_http_client_open(client, (int)strlen(body));
+	if (err != ESP_OK) {
+		ESP_LOGW(TAG, "POST open failed: %s", esp_err_to_name(err));
+		esp_http_client_cleanup(client);
+		return err;
+	}
+
+	int w = esp_http_client_write(client, body, (int)strlen(body));
+	if (w < 0) {
+		ESP_LOGW(TAG, "POST write failed (%d)", w);
+		esp_http_client_close(client);
+		esp_http_client_cleanup(client);
+		return ESP_FAIL;
+	}
+
+	(void)esp_http_client_fetch_headers(client);
+	int http_status = esp_http_client_get_status_code(client);
+	if (out_status) {
+		*out_status = http_status;
+	}
+	ESP_LOGI(TAG, "POST bootloader_status=%u -> http=%d", (unsigned)status, http_status);
+
+	/* Drain response body (optional) */
+	char resp[64];
+	while (esp_http_client_read(client, resp, sizeof(resp)) > 0) {
+		;
+	}
+
+	esp_http_client_close(client);
+	esp_http_client_cleanup(client);
+
+	return ESP_OK;
+}
+
+// static void SetFirmwareStatus(ota_bootloader_state_t status)
+// {
+// 	const char *base = (const char *)pv;
+// 	char url[192];
+// 	build_url(url, sizeof(url), base, EXAMPLE_STATUS_PATH);
+// 	ESP_LOGI(TAG, "Status endpoint: %s", url);
+
+// 	while (1) {
+// 		int http_status = -1;
+// 		/* Report that firmware/app is running. Change this based on your state machine if needed. */
+// 		esp_err_t err = http_post_status(url, OTA_FIRMWARE_RUNNING, &http_status);
+// 		if (err != ESP_OK || http_status < 200 || http_status >= 300) {
+// 			ESP_LOGW(TAG, "POST status failed: %s (http=%d)", esp_err_to_name(err), http_status);
+// 		}
+// 		vTaskDelay(pdMS_TO_TICKS(EXAMPLE_STATUS_PERIOD_MS));
+// 	}
+// }
+
 
 static void led_init(void)
 {
@@ -69,6 +196,24 @@ static void led_init(void)
 static void led_set(bool on)
 {
 	ESP_ERROR_CHECK(gpio_set_level(EXAMPLE_LED_GPIO, on ? 1 : 0));
+}
+
+static void http_status_task(void *pv)
+{
+	const char *base = (const char *)pv;
+	char url[192];
+	build_url(url, sizeof(url), base, EXAMPLE_STATUS_PATH);
+	ESP_LOGI(TAG, "Status endpoint: %s", url);
+
+	while (1) {
+		int http_status = -1;
+		/* Report that firmware/app is running. Change this based on your state machine if needed. */
+		esp_err_t err = http_post_status(url, OTA_FIRMWARE_RUNNING, &http_status);
+		if (err != ESP_OK || http_status < 200 || http_status >= 300) {
+			ESP_LOGW(TAG, "POST status failed: %s (http=%d)", esp_err_to_name(err), http_status);
+		}
+		vTaskDelay(pdMS_TO_TICKS(EXAMPLE_STATUS_PERIOD_MS));
+	}
 }
 
 static void str_trim_inplace(char *s)
@@ -174,7 +319,7 @@ static esp_err_t http_get_body(const char *url, char *out_body, size_t out_body_
 	if (out_status) {
 		*out_status = status;
 	}
-	printf("HTTP status=%d, content_length=%lld \n", status, (long long)content_length);
+	ESP_LOGI(TAG, "HTTP status=%d, content_length=%lld \n", status, (long long)content_length);
 
 	int total = 0;
 	while (total < (int)out_body_size - 1) {
@@ -197,117 +342,6 @@ static esp_err_t http_get_body(const char *url, char *out_body, size_t out_body_
 	return ESP_OK;
 }
 
-static esp_err_t http_post_count(const char *url, uint32_t count, int *out_status)
-{
-	if (url == NULL || url[0] == '\0') {
-		return ESP_ERR_INVALID_ARG;
-	}
-
-	char body[64];
-	snprintf(body, sizeof(body), "{\"count\":%u}", (unsigned)count);
-
-	esp_http_client_config_t cfg = {
-		.url = url,
-		.timeout_ms = 10000,
-		.keep_alive_enable = true,
-		.disable_auto_redirect = false,
-	};
-
-	esp_http_client_handle_t client = esp_http_client_init(&cfg);
-	if (client == NULL) {
-		return ESP_FAIL;
-	}
-
-	esp_err_t err = esp_http_client_set_method(client, HTTP_METHOD_POST);
-	if (err != ESP_OK) {
-		esp_http_client_cleanup(client);
-		return err;
-	}
-
-	(void)esp_http_client_set_header(client, "Content-Type", "application/json");
-	err = esp_http_client_set_post_field(client, body, (int)strlen(body));
-	if (err != ESP_OK) {
-		esp_http_client_cleanup(client);
-		return err;
-	}
-
-	/* Open with write_len so the library knows how much we're sending */
-	err = esp_http_client_open(client, (int)strlen(body));
-	if (err != ESP_OK) {
-		ESP_LOGW(TAG, "POST open failed: %s", esp_err_to_name(err));
-		esp_http_client_cleanup(client);
-		return err;
-	}
-
-	int w = esp_http_client_write(client, body, (int)strlen(body));
-	if (w < 0) {
-		ESP_LOGW(TAG, "POST write failed (%d)", w);
-		esp_http_client_close(client);
-		esp_http_client_cleanup(client);
-		return ESP_FAIL;
-	}
-
-	(void)esp_http_client_fetch_headers(client);
-	int status = esp_http_client_get_status_code(client);
-	if (out_status) {
-		*out_status = status;
-	}
-	ESP_LOGI(TAG, "POST count=%u -> status=%d", (unsigned)count, status);
-
-	/* Drain response body (optional) */
-	char resp[64];
-	while (esp_http_client_read(client, resp, sizeof(resp)) > 0) {
-		;
-	}
-
-	esp_http_client_close(client);
-	esp_http_client_cleanup(client);
-	return ESP_OK;
-}
-
-static void http_count_task(void *pv)
-{
-	const char *url = (const char *)pv;
-	uint32_t count = 0;
-	while (1) {
-		int status = -1;
-		esp_err_t err = http_post_count(url, count++, &status);
-		if (err != ESP_OK) {
-			ESP_LOGW(TAG, "POST count failed: %s (status=%d)", esp_err_to_name(err), status);
-		}
-		vTaskDelay(pdMS_TO_TICKS(EXAMPLE_COUNT_PERIOD_MS));
-	}
-}
-
-static void http_led_task(void *pv)
-{
-	const char *url = (const char *)pv;
-	bool last_known = false;
-	bool has_state = false;
-
-	while (1) {
-		char body[256];
-		int status = -1;
-		esp_err_t err = http_get_body(url, body, sizeof(body), &status);
-		if (err == ESP_OK && status >= 200 && status < 300) {
-			bool on = false;
-			if (parse_led_state(body, &on)) {
-				if (!has_state || on != last_known) {
-					ESP_LOGI(TAG, "LED -> %s (body='%s')", on ? "ON" : "OFF", body);
-				}
-				led_set(on);
-				last_known = on;
-				has_state = true;
-			} else {
-				ESP_LOGW(TAG, "Unrecognized body='%s' (expect on/off)", body);
-			}
-		} else {
-			ESP_LOGW(TAG, "HTTP status=%d, err=%s", status, esp_err_to_name(err));
-		}
-
-		vTaskDelay(pdMS_TO_TICKS(EXAMPLE_POLL_PERIOD_MS));
-	}
-}
 
 void app_main(void)
 {
@@ -328,9 +362,7 @@ void app_main(void)
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 	ESP_ERROR_CHECK(example_connect());
 
-	ESP_LOGI(TAG, "Polling URL: %s", CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL);
-	xTaskCreate(http_led_task, "http_led_task", 4096, (void *)CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL, 5, NULL);
-	ESP_LOGI(TAG, "Posting count to: %s", EXAMPLE_COUNT_URL);
-	xTaskCreate(http_count_task, "http_count_task", 4096, (void *)EXAMPLE_COUNT_URL, 5, NULL);
+	ESP_LOGI(TAG, "Base URL: %s", CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL);
+	xTaskCreate(http_status_task, "http_status_task", 4096, (void *)CONFIG_EXAMPLE_FIRMWARE_UPGRADE_URL, 5, NULL);
 }
 

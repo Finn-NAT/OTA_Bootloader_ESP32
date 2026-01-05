@@ -25,6 +25,18 @@
     </div>
 
     <div class="row" style="margin-top: .75rem;">
+      <div>ESP32 connection:</div>
+      <div id="conn" class="pill off">unknown</div>
+      <div id="connDetail" class="small"></div>
+    </div>
+
+    <div class="row" style="margin-top: .75rem;">
+      <div>bootloader_status:</div>
+      <div id="bl" class="pill">-</div>
+      <div class="small">(-1 = disconnected)</div>
+    </div>
+
+    <div class="row" style="margin-top: .75rem;">
       <div>Last count:</div>
       <div id="count" class="pill">-</div>
     </div>
@@ -47,6 +59,29 @@
         el.classList.toggle('off', txt !== 'on');
       }
 
+      function renderConn(online, lastSeen, timeoutS) {
+        const el = document.getElementById('conn');
+        const detail = document.getElementById('connDetail');
+
+        const isOnline = !!online;
+        el.textContent = isOnline ? 'online' : 'offline';
+        el.classList.toggle('on', isOnline);
+        el.classList.toggle('off', !isOnline);
+
+        if (!lastSeen) {
+          detail.textContent = '';
+          return;
+        }
+        const ageS = Math.max(0, (Date.now() / 1000) - Number(lastSeen));
+        const t = (timeoutS === null || timeoutS === undefined) ? '' : ` (timeout ${timeoutS}s)`;
+        detail.textContent = `last seen ${ageS.toFixed(1)}s ago${t}`;
+      }
+
+      function renderBootloaderStatus(v) {
+        const el = document.getElementById('bl');
+        el.textContent = (v === null || v === undefined) ? '-' : String(v);
+      }
+
       function renderCount(v) {
         const el = document.getElementById('count');
         el.textContent = (v === null || v === undefined) ? '-' : String(v);
@@ -62,6 +97,16 @@
           const rc = await fetch('/count', { cache: 'no-store' });
           const jc = await rc.json();
           renderCount(jc.last_count);
+        } catch (e) {
+          // ignore
+        }
+
+        // connection status (optional)
+        try {
+          const rs = await fetch('/status', { cache: 'no-store' });
+          const js = await rs.json();
+          renderConn(js.online, js.last_seen, js.timeout_s);
+          renderBootloaderStatus(js.status ? js.status.bootloader_status : undefined);
         } catch (e) {
           // ignore
         }
@@ -82,6 +127,8 @@
         const data = JSON.parse(ev.data);
         renderLed(data.on ? 'on' : 'off');
         renderCount(data.last_count);
+        renderConn(data.online, data.last_seen, data.timeout_s);
+        renderBootloaderStatus(data.status ? data.status.bootloader_status : undefined);
       });
       es.addEventListener('led', (ev) => {
         const data = JSON.parse(ev.data);
@@ -91,6 +138,13 @@
         const data = JSON.parse(ev.data);
         renderCount(data.count);
       });
+
+      es.addEventListener('status', (ev) => {
+        const data = JSON.parse(ev.data);
+        renderConn(data.online, data.last_seen, data.timeout_s);
+        renderBootloaderStatus(data.status ? data.status.bootloader_status : undefined);
+      });
+
       es.onerror = () => {
         // If SSE drops (sleep/wifi), fallback to periodic refresh.
       };
