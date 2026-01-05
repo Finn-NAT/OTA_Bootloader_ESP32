@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title }}</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b1220; color:#e6edf3; margin:0; }
+      .wrap { max-width: 900px; margin: 48px auto; padding: 0 16px; }
+      .card { background:#111a2b; border:1px solid #22304d; border-radius:12px; padding:16px; }
+      a { color:#18a0fb; }
+      code { color:#ffd166; }
+      .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+      input[type="file"] { color:#e6edf3 }
+      button { background:#18a0fb; border:0; padding:10px 14px; border-radius:10px; color:#04121f; font-weight:600; cursor:pointer; }
+      button:disabled { opacity:0.6; cursor:not-allowed; }
+      .small { opacity:0.85; font-size: 0.95rem; }
+      .status { white-space: pre-wrap; background:#0b1220; border:1px solid #22304d; border-radius:10px; padding:12px; margin-top:12px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>{{ title }}</h1>
+      <div class="card">
+        <p>{{ message }}</p>
+
+        <hr style="border:0; border-top:1px solid #22304d; margin:16px 0;" />
+
+        <h2 style="margin: 0 0 8px; font-size: 1.2rem">Upload firmware (.bin)</h2>
+        <p class="small">Khi ấn Upload: server sẽ xoá tất cả file <code>.bin</code> hiện có trong folder và lưu file bạn chọn.</p>
+
+        <form id="uploadForm" class="row">
+          <input id="binFile" name="file" type="file" accept=".bin" required />
+          <button id="uploadBtn" type="submit">Upload</button>
+        </form>
+        <div id="uploadStatus" class="status" style="display:none"></div>
+      </div>
+    </div>
+
+    <script>
+      const form = document.getElementById('uploadForm');
+      const fileInput = document.getElementById('binFile');
+      const btn = document.getElementById('uploadBtn');
+      const statusEl = document.getElementById('uploadStatus');
+
+      function showStatus(text) {
+        statusEl.style.display = 'block';
+        statusEl.textContent = text;
+      }
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!fileInput.files || !fileInput.files.length) {
+          showStatus('Chưa chọn file .bin');
+          return;
+        }
+
+        btn.disabled = true;
+        showStatus('Đang upload...');
+
+        try {
+          const fd = new FormData();
+          fd.append('file', fileInput.files[0]);
+
+          const res = await fetch('/upload', { method: 'POST', body: fd });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            const msg = (data && data.error) ? data.error : ('HTTP ' + res.status);
+            showStatus('Upload thất bại: ' + msg);
+            return;
+          }
+
+          showStatus(
+            'Upload OK\n' +
+            'Đã xoá file .bin cũ: ' + data.deleted_old_bin_files + '\n' +
+            'Đã lưu: ' + data.saved_as + ' (' + data.bytes + ' bytes)\n' +
+            'Folder: ' + data.upload_dir
+          );
+        } catch (err) {
+          showStatus('Upload lỗi: ' + err);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
