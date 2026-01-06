@@ -42,16 +42,29 @@
           <div class="small">(-1 = disconnected)</div>
         </div>
 
+        <div class="row" style="margin-top:8px;">
+          <div>update:</div>
+          <div id="upd" class="pill off">unknown</div>
+          <div class="small">true khi nhấn Upload; false khi bootloader_status = 0 hoặc -1</div>
+        </div>
+
         <hr style="border:0; border-top:1px solid #22304d; margin:16px 0;" />
 
         <h2 style="margin: 0 0 8px; font-size: 1.2rem">Upload firmware (.bin)</h2>
         <p class="small">Khi ấn Upload: server sẽ xoá tất cả file <code>.bin</code> hiện có trong folder và lưu file bạn chọn.</p>
+
+        <div class="small" style="margin: 10px 0 0;">
+          Firmware list:
+          <a id="fwUrl" href="/firmware" target="_blank" rel="noopener">/firmware</a>
+          <span id="fwMeta" class="small" style="margin-left:8px;"></span>
+        </div>
 
         <form id="uploadForm" class="row">
           <input id="binFile" name="file" type="file" accept=".bin" required />
           <button id="uploadBtn" type="submit">Upload</button>
         </form>
         <div id="uploadStatus" class="status" style="display:none"></div>
+        <div id="uploadPhase" class="small" style="margin-top:8px;"></div>
       </div>
     </div>
 
@@ -89,10 +102,39 @@
         el.textContent = (v === null || v === undefined) ? '-' : String(v);
       }
 
+      function renderUpdateFlag(v) {
+        const el = document.getElementById('upd');
+        const isOn = !!v;
+        el.textContent = (v === null || v === undefined) ? 'unknown' : (isOn ? 'true' : 'false');
+        el.classList.toggle('on', isOn);
+        el.classList.toggle('off', !isOn);
+      }
+
+      function renderPhase(phase, detail) {
+        const el = document.getElementById('uploadPhase');
+        const p = String(phase || 'idle');
+        let msg = '';
+        if (p === 'idle') msg = '';
+        else if (p === 'uploaded') msg = 'Đã upload file, đang chuẩn bị...';
+        else if (p === 'waiting_device') msg = 'Đang đợi thiết bị (bootloader_status quay lại 1)...';
+        else if (p === 'success') msg = 'Nạp code thành công (bootloader_status=1).';
+        else msg = 'Trạng thái: ' + p;
+        if (detail) msg += ' ' + detail;
+        el.textContent = msg;
+      }
+
       function applyStatusPayload(p) {
         if (!p) return;
         renderConn(p.online, p.last_seen, p.timeout_s);
         renderBootloaderStatus(p.status ? p.status.bootloader_status : undefined);
+      }
+
+      function applyUpdatePayload(p) {
+        if (!p) return;
+        renderUpdateFlag(p.update);
+        if (p.phase !== undefined) {
+          renderPhase(p.phase);
+        }
       }
 
       async function refreshStatus() {
@@ -100,6 +142,41 @@
           const rs = await fetch('/status', { cache: 'no-store' });
           const js = await rs.json();
           applyStatusPayload(js);
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      async function refreshUpdate() {
+        try {
+          const rs = await fetch('/update_json', { cache: 'no-store' });
+          const js = await rs.json();
+          applyUpdatePayload(js);
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      async function refreshFirmwareInfo() {
+        const meta = document.getElementById('fwMeta');
+        const link = document.getElementById('fwUrl');
+        try {
+          const rs = await fetch('/firmware_info', { cache: 'no-store' });
+          const js = await rs.json();
+          if (!js || !js.ok) return;
+
+          if (!js.has_firmware) {
+            meta.textContent = '(chưa có firmware)';
+            link.textContent = '/firmware';
+            link.setAttribute('href', '/firmware');
+            return;
+          }
+
+          meta.textContent = `(${js.name}, ${js.bytes} bytes)`;
+          // js.ota_path is a direct download URL: /firmware/<filename>
+          // link stays /firmware (listing). We just show the suggested download URL next to it.
+          const p = js.ota_path || ('/firmware/' + encodeURIComponent(js.name));
+          meta.textContent = `(${js.name}, ${js.bytes} bytes) - link: ${p}`;
         } catch (e) {
           // ignore
         }
@@ -127,12 +204,22 @@
             return;
           }
 
+          // Update UI immediately from response.
+          if (data && (data.update !== undefined)) {
+            renderUpdateFlag(data.update);
+          }
+          if (data && (data.phase !== undefined)) {
+            renderPhase(data.phase);
+          }
+
           showStatus(
             'Upload OK\n' +
             'Đã xoá file .bin cũ: ' + data.deleted_old_bin_files + '\n' +
             'Đã lưu: ' + data.saved_as + ' (' + data.bytes + ' bytes)\n' +
             'Folder: ' + data.upload_dir
           );
+
+          refreshFirmwareInfo();
         } catch (err) {
           showStatus('Upload lỗi: ' + err);
         } finally {
@@ -151,6 +238,14 @@
           const data = JSON.parse(ev.data);
           applyStatusPayload(data);
         });
+        es.addEventListener('update', (ev) => {
+          const data = JSON.parse(ev.data);
+          applyUpdatePayload(data);
+        });
+        es.addEventListener('upload', (ev) => {
+          const data = JSON.parse(ev.data);
+          renderPhase(data.phase, data.detail);
+        });
         es.onerror = () => {
           // If SSE drops, fallback to polling.
         };
@@ -159,7 +254,11 @@
       }
 
       refreshStatus();
+      refreshUpdate();
+      refreshFirmwareInfo();
       setInterval(refreshStatus, 2000);
+      setInterval(refreshUpdate, 2000);
+      setInterval(refreshFirmwareInfo, 5000);
     </script>
   </body>
 </html>

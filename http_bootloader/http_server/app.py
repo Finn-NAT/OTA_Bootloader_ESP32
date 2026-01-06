@@ -10,7 +10,7 @@ from pathlib import Path
 
 from werkzeug.utils import secure_filename
 
-from flask import Flask, jsonify, render_template, request, Response
+from flask import Flask, jsonify, render_template, request, Response, send_file
 
 app = Flask(__name__)
 
@@ -42,6 +42,17 @@ _status_lock = threading.Lock()
 _last_seen: float | None = None
 _last_status: dict | None = None
 
+# "Update" flag: becomes True when user uploads firmware (start update flow)
+# and becomes False when device reports bootloader_status == 1 again.
+_update_in_progress: bool = False
+
+# Upload progress text for UI (best-effort).
+_upload_phase: str = "idle"  # idle|uploaded|waiting_device|success
+
+# To avoid false 'success' immediately after upload, we require this sequence:
+#   upload -> (observe 0) -> then (observe 1) => success
+_saw_bootloader_zero_after_upload: bool = False
+
 # Each connected browser gets its own queue.
 _subscribers: set[queue.Queue[str]] = set()
 
@@ -57,6 +68,25 @@ def _broadcast(event: str, data: dict) -> None:
             dead.append(q)
     for q in dead:
         _subscribers.discard(q)
+
+
+def _set_update_in_progress(v: bool) -> None:
+    global _update_in_progress
+    if _update_in_progress == v:
+        return
+    _update_in_progress = v
+    _broadcast("update", {"update": _update_in_progress})
+
+
+def _set_upload_phase(phase: str, detail: str | None = None) -> None:
+    global _upload_phase
+    if _upload_phase == phase and detail is None:
+        return
+    _upload_phase = phase
+    payload: dict = {"phase": _upload_phase}
+    if detail is not None:
+        payload["detail"] = detail
+    _broadcast("upload", payload)
 
 
 def _is_online() -> bool:
@@ -94,6 +124,8 @@ def _watchdog() -> None:
                         "status": dict(_last_status or {}),
                     },
                 )
+                # If device is offline, update flag must be false.
+                _set_update_in_progress(False)
 
 
 threading.Thread(target=_watchdog, daemon=True).start()
@@ -115,6 +147,46 @@ def _delete_existing_bins() -> int:
             # Best-effort; if a file is locked, we'll fail later on save.
             pass
     return deleted
+
+
+def _latest_bin_path() -> Path | None:
+    """Pick the newest .bin inside UPLOAD_DIR (mtime)."""
+    _ensure_upload_dir()
+    bins = list(UPLOAD_DIR.glob("*.bin"))
+    if not bins:
+        return None
+    bins.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return bins[0]
+
+
+def _list_bins() -> list[dict]:
+    """List all .bin files in UPLOAD_DIR."""
+    _ensure_upload_dir()
+    out: list[dict] = []
+    for p in sorted(UPLOAD_DIR.glob("*.bin"), key=lambda x: x.name.lower()):
+        try:
+            st = p.stat()
+            out.append(
+                {
+                    "name": p.name,
+                    "bytes": st.st_size,
+                    "mtime": st.st_mtime,
+                    "url": f"/firmware/{p.name}",
+                }
+            )
+        except OSError:
+            continue
+    return out
+
+
+def _safe_firmware_path(name: str) -> Path | None:
+    safe = secure_filename(name)
+    if not safe or Path(safe).suffix.lower() not in ALLOWED_EXTENSIONS:
+        return None
+    p = (UPLOAD_DIR / safe).resolve()
+    if UPLOAD_DIR not in p.parents and p != UPLOAD_DIR:
+        return None
+    return p
 
 
 @app.get("/")
@@ -141,6 +213,33 @@ def post_status():
         _last_seen = time.time()
         # Keep status nested (no extra top-level fields).
         _last_status = dict(data)
+
+        # Finish update flow ONLY when device reports bootloader_status == 1 again.
+        # (You requested: on upload we force bootloader_status=0; wait until it returns to 1 -> success.)
+        # Your rule:
+        # - update = true only when user presses Upload
+        # - update = false when bootloader_status becomes 0 OR -1
+        bs = _last_status.get("bootloader_status")
+        try:
+            # If device reports it is in bootloader (0) or offline (-1), ensure update flag is false.
+            if bs is not None and int(bs) in (0, -1):
+                _set_update_in_progress(False)
+
+            # Track bootloader_status transitions for upload success.
+            if bs is not None and int(bs) == 0 and _upload_phase == "waiting_device":
+                global _saw_bootloader_zero_after_upload
+                _saw_bootloader_zero_after_upload = True
+
+            # If device reports bootloader_status == 1 and we were waiting for it,
+            # mark upload flow as successful and clear update flag.
+            if bs is not None and int(bs) == 1:
+                # Only transition to success from the waiting_device phase.
+                if _upload_phase == "waiting_device" and _saw_bootloader_zero_after_upload:
+                    _set_upload_phase("success", "device reported bootloader_status=1")
+                # Clear update flag when device is back to running.
+                _set_update_in_progress(False)
+        except Exception:
+            pass
 
         snapshot = {
             "online": True,
@@ -175,6 +274,67 @@ def get_status():
         )
 
 
+@app.get("/update")
+def get_update():
+    """ESP32 polling endpoint.
+
+    Keep it compatible with parse_update_firmware_state(): return plain text
+    'on'/'off' (NOT JSON).
+    """
+    return Response("on" if _update_in_progress else "off", mimetype="text/plain")
+
+
+@app.get("/update_json")
+def get_update_json():
+    """UI-friendly endpoint (JSON)."""
+    return jsonify({"ok": True, "update": _update_in_progress, "phase": _upload_phase})
+
+
+@app.get("/firmware")
+def get_firmware():
+    """List all firmware files.
+
+    You said: "tất cả các file có trong folder firmware được up lên server url/firmware".
+    So this endpoint returns a JSON listing; you can choose which file to download.
+    Download a specific file at: GET /firmware/<filename>.bin
+    """
+    return jsonify({"ok": True, "files": _list_bins()})
+
+
+@app.get("/firmware/<path:name>")
+def get_firmware_file(name: str):
+    """Download a specific firmware file by name."""
+    p = _safe_firmware_path(name)
+    if p is None:
+        return jsonify({"ok": False, "error": "invalid firmware name"}), 400
+    if not p.exists():
+        return jsonify({"ok": False, "error": "firmware not found"}), 404
+    return send_file(p, mimetype="application/octet-stream", as_attachment=False, download_name=p.name)
+
+
+@app.get("/firmware_info")
+def firmware_info():
+    """Backward-compatible helper for UI/debug.
+
+    Now that /firmware is a listing, we expose the same information but pointing to /firmware/<name>.
+    """
+    p = _latest_bin_path()
+    if p is None:
+        return jsonify({"ok": True, "has_firmware": False, "files": []})
+
+    return jsonify(
+        {
+            "ok": True,
+            "has_firmware": True,
+            "name": p.name,
+            "bytes": p.stat().st_size,
+            "path": str(p),
+            "ota_path": f"/firmware/{p.name}",
+            "files": _list_bins(),
+        }
+    )
+
+
 @app.get("/events")
 def events() -> Response:
     """SSE stream for real-time status updates (like led_server.py)."""
@@ -191,6 +351,16 @@ def events() -> Response:
             "event: snapshot\n"
             f"data: {json.dumps({'online': online, 'last_seen': _last_seen, 'timeout_s': HEARTBEAT_TIMEOUT_S, 'status': payload}, ensure_ascii=False)}\n\n"
         )
+
+    # Also send initial update state.
+    q.put_nowait(
+        "event: update\n" f"data: {json.dumps({'update': _update_in_progress}, ensure_ascii=False)}\n\n"
+    )
+
+    # And initial upload phase.
+    q.put_nowait(
+        "event: upload\n" f"data: {json.dumps({'phase': _upload_phase}, ensure_ascii=False)}\n\n"
+    )
 
     def gen():
         try:
@@ -247,9 +417,36 @@ def upload_bin():
     except Exception as e:
         return jsonify({"ok": False, "error": f"failed to save file: {e}"}), 500
 
+    # Mark update flow started.
+    _set_update_in_progress(True)
+    _set_upload_phase("uploaded", f"saved {save_path.name}")
+
+    # New upload requires a fresh 0 -> 1 transition to be considered success.
+    global _saw_bootloader_zero_after_upload
+    _saw_bootloader_zero_after_upload = False
+
+    # Per your requirement: as soon as user presses Upload, bootloader_status should be 0.
+    # We "force" the displayed status to 0 so ESP32 will observe it immediately (via /status) even
+    # before the real device state changes.
+    global _last_status
+    with _status_lock:
+        if _last_status is None:
+            _last_status = {}
+        _last_status["bootloader_status"] = 0
+        snapshot = {
+            "online": _is_online(),
+            "last_seen": _last_seen,
+            "timeout_s": HEARTBEAT_TIMEOUT_S,
+            "status": dict(_last_status),
+        }
+    _broadcast("status", snapshot)
+    _set_upload_phase("waiting_device", "waiting for device bootloader_status=1")
+
     return jsonify(
         {
             "ok": True,
+            "update": _update_in_progress,
+            "phase": _upload_phase,
             "deleted_old_bin_files": deleted,
             "saved_as": save_path.name,
             "upload_dir": str(UPLOAD_DIR),
