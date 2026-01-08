@@ -45,7 +45,7 @@ extern const uint8_t server_cert_pem_end[] asm("_binary_ca_cert_pem_end");
 
 #define OTA_URL_SIZE 256
 
-#define X_FIRMWARE_UPGRADE_URL "http://192.168.5.95:8070/firmware/hello_world.bin"
+#define X_FIRMWARE_UPGRADE_URL "http://192.168.5.95:8070/firmware/app.bin"
 
 esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
