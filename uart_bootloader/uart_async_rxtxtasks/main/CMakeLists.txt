@@ -1,2 +1,3 @@
-idf_component_register(SRCS "uart_async_rxtxtasks_main.c"
-                    INCLUDE_DIRS ".")
+idf_component_register(SRCS "app_main.c"
+                "bootloader_ota_uart.c"
+            INCLUDE_DIRS ".")

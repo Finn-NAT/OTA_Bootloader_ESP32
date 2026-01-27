@@ -1,58 +1,72 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C6 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- | -------- |
+| Supported Targets | ESP32 | ESP32-S3 |
+| ----------------- | ----- | -------- |
 
-# UART Asynchronous Example with Separate Receive and Transfer Tasks
+# UART Host-Compatible OTA Bootloader
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+This application implements a UART bootloader for ESP32 devices that follows the
+packet format used by Microchip's bootloader utilities. The provided
+`btl_host.py` script can be reused without modifications to push new firmware
+images into an OTA application partition.
 
-This example demonstrates how two asynchronous tasks can use the same UART interface for communication. One can use
-this example to develop more complex applications for serial communication.
+## Features
 
-The example starts two FreeRTOS tasks:
-1. The first task periodically transmits `Hello world` via the UART.
-2. The second task task listens, receives and prints data from the UART.
+- Identical BL_CMD/BL_RESP protocol framing as Microchip's reference firmware.
+- Configurable UART port, pins, baud rate, and parity via `menuconfig`.
+- Automatic erase of the target partition during the unlock phase.
+- CRC-32 verification compatible with the Python host utility.
+- `BL_CMD_RESET` issues `esp_restart()` after the download completes.
 
-## How to use example
+## Project Configuration
 
-### Hardware Required
-
-The example can be run on any commonly available development board, that is based on the Espressif SoC. You will need a
-USB cable to connect the development board to a computer, and a simple one-wire cable for shorting two pins of the board.
-
-### Setup the Hardware
-
-The `RXD_PIN` and `TXD_PIN` which are configurable in the code (by default `GPIO4` and `GPIO5`) need to be shorted in
-order to receive back the same data which were sent out.
-
-### Configure the project
+Open the project configuration menu to set UART parameters matching your
+hardware connections and host script options:
 
 ```
 idf.py menuconfig
 ```
 
-### Build and Flash
+Navigate to **UART Bootloader Configuration** and adjust:
+- **UART port number**: typically `1` when using pins routed to the module
+	header.
+- **UART TXD / RXD pin numbers**: match the GPIOs wired to the host adapter.
+- **UART baud rate / parity**: must align with the arguments passed to
+	`btl_host.py`.
+- **Maximum payload bytes**: keep at or above the block size used by the host
+	script (default 256 bytes).
 
-Build the project and flash it to the board, then run monitor tool to view serial output:
+## Building and Flashing the Bootloader
+
+Build and flash the bootloader like any other ESP-IDF application:
 
 ```
-idf.py -p PORT flash monitor
+idf.py -p PORT flash
 ```
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+After reset the bootloader waits for commands on the configured UART. No
+monitor output is expected until a host session begins.
 
-See the Getting Started Guide for full steps to configure and use ESP-IDF to build projects.
+## Programming an Application Image
 
-## Example Output
+Use the supplied `btl_host.py` script from a PC connected to the same UART.
+Example invocation for an ESP32-S3 board, writing an image to the factory app
+partition at offset `0x10000`:
 
-You will receive the following repeating output from the monitoring console:
 ```
-...
-I (3261) TX_TASK: Wrote 11 bytes
-I (4261) RX_TASK: Read 11 bytes: 'Hello world'
-I (4261) RX_TASK: 0x3ffb821c   48 65 6c 6c 6f 20 77 6f  72 6c 64                 |Hello world|
-...
+python btl_host.py -i COM5 -r 115200 -d esp32s3 -a 0x10000 -f build/app.bin
 ```
+
+Important notes:
+- The `-d` option selects the erase block size used by the host; choose
+	`esp32s3` or `esp32`.
+- The `-a` argument must point to the base address of the target application
+	partition. Check your partition table if you intend to update an OTA slot.
+- The script automatically performs UNLOCK, DATA, VERIFY, and RESET commands.
 
 ## Troubleshooting
 
-If you do not see any output from `RX_TASK` then check if you have the `RXD_PIN` and `TXD_PIN` pins shorted on the board.
+- If the host reports timeouts, verify UART wiring, parity configuration, and
+	that no other process is accessing the serial port.
+- CRC mismatches usually indicate that the unlock address/length does not align
+	with the partition being updated.
+- Ensure the bootloader binary itself resides in a separate partition from the
+	image being programmed to avoid self-overwrite.
