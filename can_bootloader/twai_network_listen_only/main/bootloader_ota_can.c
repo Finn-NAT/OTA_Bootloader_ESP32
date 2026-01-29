@@ -273,7 +273,7 @@ static void can_bootloader_init(void)
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     
     /* TWAI general configuration */
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(14, 13, TWAI_MODE_NORMAL);
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(13, 15, TWAI_MODE_NORMAL);
     g_config.rx_queue_len = CONFIG_BOOTLOADER_CAN_RX_QUEUE_SIZE;
     g_config.tx_queue_len = CONFIG_BOOTLOADER_CAN_TX_QUEUE_SIZE;
 
@@ -294,7 +294,7 @@ static void can_bootloader_init(void)
         return;
     }
 
-    ESP_LOGI(TAG, "CAN Bootloader initialized (TX: GPIO14, RX: GPIO13, 500kbit/s)");
+    ESP_LOGI(TAG, "CAN Bootloader initialized (TX: GPIO13, RX: GPIO15, 500kbit/s)");
     
     // Mark initialization as done
     can_bl_init_done = true;
