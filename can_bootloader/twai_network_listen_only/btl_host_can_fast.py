@@ -13,6 +13,7 @@ from ctypes import c_int, c_uint32, c_uint8, c_int32, c_int64, c_void_p, POINTER
 NTCAN_SUCCESS       = 0
 NTCAN_RX_TIMEOUT    = 0x00001001
 NTCAN_TX_TIMEOUT    = 0x00001002
+NTCAN_TX_QUEUE_FULL = 0x00001003
 NTCAN_NO_ID_ENABLED = 0x00001004
 
 # NTCAN Baudrate constants
@@ -65,9 +66,9 @@ class CMSG_T(Structure):
     ]
 
 class EsdCanBus:
-    """esd CAN-USB interface using NTCAN library"""
+    """esd CAN-USB interface using NTCAN library - FAST VERSION with canWrite()"""
     
-    def __init__(self, channel=0, bitrate=500000, rx_queue_size=100, tx_queue_size=100, rx_timeout=2000, tx_timeout=1000):
+    def __init__(self, channel=0, bitrate=500000, rx_queue_size=100, tx_queue_size=512, rx_timeout=2000, tx_timeout=1000):
         self.handle = NTCAN_HANDLE()
         self.channel = channel
         self.bitrate = bitrate
@@ -97,11 +98,11 @@ class EsdCanBus:
         # Set up function prototypes
         self._setup_functions()
         
-        # Open CAN channel
+        # Open CAN channel with larger TX queue for non-blocking writes
         ret = self.ntcan.canOpen(
             c_int(channel),
             c_int(0),  # flags
-            c_int32(tx_queue_size),
+            c_int32(tx_queue_size),  # Larger TX queue for canWrite
             c_int32(rx_queue_size),
             c_int32(tx_timeout),
             c_int32(rx_timeout),
@@ -112,6 +113,7 @@ class EsdCanBus:
             raise Exception("canOpen failed with error code: 0x%08X" % (ret & 0xFFFFFFFF))
         
         print(f"CAN channel {channel} opened, handle: {self.handle}")
+        print(f"TX queue size: {tx_queue_size}, RX queue size: {rx_queue_size}")
         
         # Set baudrate
         if bitrate not in BAUDRATE_MAP:
@@ -170,7 +172,7 @@ class EsdCanBus:
         self.ntcan.canTake.restype = c_int32
     
     def send(self, can_id, data):
-        """Send a CAN message"""
+        """Send a CAN message (blocking)"""
         msg = CMSG_T()
         msg.id = can_id
         msg.len = min(len(data), 8)
@@ -183,6 +185,47 @@ class EsdCanBus:
         
         if ret != NTCAN_SUCCESS:
             raise Exception("canSend failed with error code: 0x%08X" % (ret & 0xFFFFFFFF))
+        
+        return count.value
+    
+    def write(self, can_id, data):
+        """Send a CAN message (non-blocking) - puts in TX queue and returns immediately"""
+        msg = CMSG_T()
+        msg.id = can_id
+        msg.len = min(len(data), 8)
+        msg.msg_lost = 0
+        for i in range(msg.len):
+            msg.data[i] = data[i] if i < len(data) else 0
+        
+        count = c_int32(1)
+        ret = self.ntcan.canWrite(self.handle, byref(msg), byref(count), None)
+        
+        if ret == NTCAN_TX_QUEUE_FULL:
+            return -1  # Queue full, need to wait
+        elif ret != NTCAN_SUCCESS:
+            raise Exception("canWrite failed with error code: 0x%08X" % (ret & 0xFFFFFFFF))
+        
+        return count.value
+    
+    def write_batch(self, can_id, data_list):
+        """Send multiple CAN messages at once (non-blocking batch)"""
+        num_msgs = len(data_list)
+        msg_array = (CMSG_T * num_msgs)()
+        
+        for i, data in enumerate(data_list):
+            msg_array[i].id = can_id
+            msg_array[i].len = min(len(data), 8)
+            msg_array[i].msg_lost = 0
+            for j in range(msg_array[i].len):
+                msg_array[i].data[j] = data[j] if j < len(data) else 0
+        
+        count = c_int32(num_msgs)
+        ret = self.ntcan.canWrite(self.handle, msg_array, byref(count), None)
+        
+        if ret == NTCAN_TX_QUEUE_FULL:
+            return count.value  # Return how many were actually queued
+        elif ret != NTCAN_SUCCESS:
+            raise Exception("canWrite batch failed with error code: 0x%08X" % (ret & 0xFFFFFFFF))
         
         return count.value
     
@@ -293,15 +336,66 @@ def uint32(v):
     return [(v >> 0) & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff]
 
 #------------------------------------------------------------------------------
+def can_send_packet_fast(bus, data):
+    """Send data over CAN in 8-byte frames using non-blocking canWrite()"""
+    # Split data into 8-byte chunks
+    chunks = [data[i:i + 8] for i in range(0, len(data), 8)]
+    total_chunks = len(chunks)
+    
+    # Batch size - send this many before checking/waiting
+    batch_size = 100
+    
+    i = 0
+    retries = 0
+    max_retries = 10
+    
+    while i < total_chunks:
+        # Try to send a batch
+        batch_end = min(i + batch_size, total_chunks)
+        batch = [bytes(chunks[j]) for j in range(i, batch_end)]
+        
+        try:
+            # Try batch write
+            sent = bus.write_batch(CAN_TX_ID, batch)
+            
+            if sent == -1 or sent == 0:
+                # Queue full, wait a bit
+                retries += 1
+                if retries > max_retries:
+                    error('TX queue full after %d retries' % max_retries)
+                time.sleep(0.005)  # 5ms wait
+                continue
+            
+            i += sent
+            retries = 0
+            
+            # Small delay every batch to prevent overwhelming the bus
+            if sent >= batch_size:
+                time.sleep(0.001)  # 1ms between batches
+                
+        except Exception as e:
+            # Fallback to single frame send
+            try:
+                ret = bus.write(CAN_TX_ID, bytes(chunks[i]))
+                if ret == -1:
+                    time.sleep(0.001)
+                    continue
+                i += 1
+            except Exception as e2:
+                error('CAN send error: %s' % str(e2))
+    
+    # Wait a bit for all frames to be transmitted
+    time.sleep(0.010)  # 10ms to ensure all frames sent
+
+#------------------------------------------------------------------------------
 def can_send_packet(bus, data):
-    """Send data over CAN in 8-byte frames"""
+    """Send data over CAN in 8-byte frames (blocking fallback)"""
     # Split data into 8-byte chunks
     chunks = [data[i:i + 8] for i in range(0, len(data), 8)]
     
     for chunk in chunks:
         try:
             bus.send(CAN_TX_ID, bytes(chunk))
-            time.sleep(0.0001)  # Small delay between frames
         except Exception as e:
             error('CAN send error: %s' % str(e))
 
@@ -337,10 +431,13 @@ def get_version(bus):
     return btlVersion
 
 #------------------------------------------------------------------------------
-def send_request(bus, cmd, size, data):
+def send_request(bus, cmd, size, data, use_fast=True):
     packet = uint32(BL_GUARD) + size + [cmd] + data
     
-    can_send_packet(bus, packet)
+    if use_fast:
+        can_send_packet_fast(bus, packet)
+    else:
+        can_send_packet(bus, packet)
 
     for i in range(3):
         resp = get_response(bus)
@@ -378,6 +475,7 @@ def main():
     parser.add_option('-d', '--device', dest='device', help='target device (esp32s3/esp32)', metavar='DEV')
     parser.add_option('--tx-id', dest='tx_id', help='CAN TX ID (host to device)', default='0x100', metavar='ID')
     parser.add_option('--rx-id', dest='rx_id', help='CAN RX ID (device to host)', default='0x101', metavar='ID')
+    parser.add_option('--slow', dest='slow', help='use blocking canSend() instead of fast canWrite()', default=False, action='store_true')
 
     (options, args) = parser.parse_args()
 
@@ -413,19 +511,26 @@ def main():
     except ValueError as inst:
         error('invalid address value: %s' % options.address)
 
+    use_fast = not options.slow
+    
     # Initialize esd CAN-USB using NTCAN library
     try:
         verbose(options.verbose, 'Initializing esd CAN-USB: channel=%d, bitrate=%d' % 
                 (options.channel, options.bitrate))
         
+        # Use larger TX queue for fast mode
+        tx_queue = 512 if use_fast else 100
+        
         bus = EsdCanBus(
             channel=options.channel,
             bitrate=options.bitrate,
+            tx_queue_size=tx_queue,
             rx_timeout=2000,
             tx_timeout=1000
         )
-            
-        verbose(options.verbose, 'CAN bus initialized successfully')
+        
+        mode_str = "FAST (canWrite)" if use_fast else "SLOW (canSend)"
+        verbose(options.verbose, f'CAN bus initialized successfully - Mode: {mode_str}')
         
     except Exception as inst:
         error('Failed to initialize CAN interface: %s' % str(inst))
@@ -435,7 +540,8 @@ def main():
 
     verbose(options.verbose, 'Reading Bootloader Version')
 
-    resp = send_request(bus, BL_CMD_READ_VERSION, uint32(0), uint32(0))
+    # Use blocking for small commands
+    resp = send_request(bus, BL_CMD_READ_VERSION, uint32(0), uint32(0), use_fast=False)
 
     if resp != BL_RESP_OK:
         error('invalid response code (0x%02x). Read Bootloader version failed.' % resp)
@@ -453,7 +559,7 @@ def main():
 
     if (options.file is not None):
         verbose(options.verbose, 'Unlocking\n')
-        resp = send_request(bus, BL_CMD_UNLOCK, uint32(8), uint32(address) + uint32(size))
+        resp = send_request(bus, BL_CMD_UNLOCK, uint32(8), uint32(address) + uint32(size), use_fast=False)
 
     if resp != BL_RESP_OK:
         error('invalid response code (0x%02x). Check that your file size and address are correct.' % resp)
@@ -462,6 +568,8 @@ def main():
     blocks = [data[i:i + ERASE_SIZE] for i in range(0, len(data), ERASE_SIZE)]
 
     addr = address
+    
+    start_time = time.time()
 
     for idx, blk in enumerate(blocks):
         if ((idx + 1) == len(blocks)) and ((size % ERASE_SIZE) != 0):
@@ -474,24 +582,29 @@ def main():
         printProgressBar(idx + 1, len(blocks), prefix='Programming:', suffix='Complete', length=50)
 
         if (options.file is not None):
-            resp = send_request(bus, BL_CMD_DATA, uint32(data_length + 4), uint32(addr) + blk)
+            # Use fast mode for data packets
+            resp = send_request(bus, BL_CMD_DATA, uint32(data_length + 4), uint32(addr) + blk, use_fast=use_fast)
 
         addr += data_length
 
         if resp != BL_RESP_OK:
             error('invalid response code (0x%02x)' % resp)
+    
+    elapsed_time = time.time() - start_time
+    throughput = size / elapsed_time / 1024 if elapsed_time > 0 else 0
+    print(f"\nTransfer complete: {size} bytes in {elapsed_time:.2f}s ({throughput:.2f} KB/s)")
 
     if (options.file is not None):
         # Send Verification command
         verbose(options.verbose, 'Verification')
-        resp = send_request(bus, BL_CMD_VERIFY, uint32(4), uint32(crc))
+        resp = send_request(bus, BL_CMD_VERIFY, uint32(4), uint32(crc), use_fast=False)
         if resp == BL_RESP_CRC_OK:
             verbose(options.verbose, '... success')
         else:
             error('... fail (status = 0x%02x)' % resp)
 
     verbose(options.verbose, 'Rebooting')
-    resp = send_request(bus, BL_CMD_RESET, uint32(16), uint32(0) * 4)
+    resp = send_request(bus, BL_CMD_RESET, uint32(16), uint32(0) * 4, use_fast=False)
 
     if resp == BL_RESP_OK:
         verbose(options.verbose, 'Reboot Done')
@@ -504,5 +617,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# python btl_host_can.py -f firmware.bin -a 0x110000 -d ESP32S3 -c 0 -b 500000

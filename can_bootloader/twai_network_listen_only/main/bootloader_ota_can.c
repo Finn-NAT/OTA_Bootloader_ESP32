@@ -71,7 +71,7 @@
 // *****************************************************************************
 
 #ifndef CONFIG_BOOTLOADER_CAN_RX_QUEUE_SIZE
-#define CONFIG_BOOTLOADER_CAN_RX_QUEUE_SIZE 100
+#define CONFIG_BOOTLOADER_CAN_RX_QUEUE_SIZE 1000
 #endif
 
 #ifndef CONFIG_BOOTLOADER_CAN_TX_QUEUE_SIZE
@@ -158,11 +158,11 @@ static bool can_bl_active = false;
 static TickType_t last_byte_tick = 0;
 static uint32_t inter_byte_timeout_count = 0;
 
-/* Performance measurement timestamps */
-static TickType_t packet_start_tick = 0;
-static TickType_t packet_complete_tick = 0;
-static TickType_t flash_start_tick = 0;
-static TickType_t flash_complete_tick = 0;
+// /* Performance measurement timestamps */
+// static TickType_t packet_start_tick = 0;
+// static TickType_t packet_complete_tick = 0;
+// static TickType_t flash_start_tick = 0;
+// static TickType_t flash_complete_tick = 0;
 
 static const esp_partition_t *active_partition = NULL;
 static const esp_partition_t *update_partition = NULL;
@@ -365,8 +365,8 @@ static void input_task(void)
                     input_command   = (uint8_t)input_buffer[CMD_OFFSET];
                     header_received = true;
                     can_bl_active    = true;
-                    packet_start_tick = xTaskGetTickCount();
-                    ESP_LOGI(TAG, "[PERF] Packet header received, waiting for data...");
+                    // packet_start_tick = xTaskGetTickCount();
+                    // ESP_LOGI(TAG, "[PERF] Packet header received, waiting for data...");
                 }
 
                 ptr = 0;
@@ -391,10 +391,11 @@ static void input_task(void)
                 size = 0;
                 packet_received = true;
                 header_received = false;
-                packet_complete_tick = xTaskGetTickCount();
-                uint32_t receive_time = (packet_complete_tick - packet_start_tick) * portTICK_PERIOD_MS;
-                ESP_LOGI(TAG, "[PERF] Packet received: cmd=0x%02X, size=%" PRIu32 ", receive_time=%" PRIu32 "ms", 
-                         input_command, data_size, receive_time);
+                // packet_complete_tick = xTaskGetTickCount();
+                // uint32_t receive_time = (packet_complete_tick - packet_start_tick) * portTICK_PERIOD_MS;
+                // ESP_LOGI(TAG, "[PERF] Packet received: cmd=0x%02X, size=%" PRIu32 ", receive_time=%" PRIu32 "ms", 
+                //          input_command, data_size, receive_time);
+                ESP_LOGI(TAG, "Packet received: cmd=0x%02X, size=%" PRIu32, input_command, data_size);
             }
         }
     }
@@ -543,9 +544,9 @@ static void flash_task(void)
 {
     esp_err_t err;
 
-    flash_start_tick = xTaskGetTickCount();
-    uint32_t wait_time = (flash_start_tick - packet_complete_tick) * portTICK_PERIOD_MS;
-    ESP_LOGI(TAG, "[PERF] Flash task started, wait_time=%" PRIu32 "ms", wait_time);
+    // flash_start_tick = xTaskGetTickCount();
+    // uint32_t wait_time = (flash_start_tick - packet_complete_tick) * portTICK_PERIOD_MS;
+    // ESP_LOGI(TAG, "[PERF] Flash task started, wait_time=%" PRIu32 "ms", wait_time);
 
     // data_size = Actual data bytes to write + Address 4 Bytes
     uint32_t bytes_to_write = (data_size - 4U);
@@ -596,22 +597,24 @@ static void flash_task(void)
 
     total_bytes_written += bytes_to_write;
     
-    flash_complete_tick = xTaskGetTickCount();
-    uint32_t flash_time = (flash_complete_tick - flash_start_tick) * portTICK_PERIOD_MS;
-    ESP_LOGI(TAG, "[PERF] Flash complete: %" PRIu32 " bytes in %" PRIu32 "ms (%.2f KB/s)",
-             bytes_to_write, flash_time, 
-             flash_time > 0 ? (bytes_to_write / 1024.0) / (flash_time / 1000.0) : 0.0);
+    // flash_complete_tick = xTaskGetTickCount();
+    // uint32_t flash_time = (flash_complete_tick - flash_start_tick) * portTICK_PERIOD_MS;
+    // ESP_LOGI(TAG, "[PERF] Flash complete: %" PRIu32 " bytes in %" PRIu32 "ms (%.2f KB/s)",
+    //          bytes_to_write, flash_time, 
+    //          flash_time > 0 ? (bytes_to_write / 1024.0) / (flash_time / 1000.0) : 0.0);
+    ESP_LOGD(TAG, "Written %" PRIu32 " bytes, total: %" PRIu32,
+             bytes_to_write, total_bytes_written);    
 
     flash_data_ready = false;
     
-    TickType_t response_start = xTaskGetTickCount();
+    // TickType_t response_start = xTaskGetTickCount();
     write_response(BL_RESP_OK);
-    TickType_t response_end = xTaskGetTickCount();
-    uint32_t response_time = (response_end - response_start) * portTICK_PERIOD_MS;
+    // TickType_t response_end = xTaskGetTickCount();
+    // uint32_t response_time = (response_end - response_start) * portTICK_PERIOD_MS;
     
-    uint32_t total_time = (response_end - packet_start_tick) * portTICK_PERIOD_MS;
-    ESP_LOGI(TAG, "[PERF] Response sent in %" PRIu32 "ms. TOTAL packet time: %" PRIu32 "ms",
-             response_time, total_time);
+    // uint32_t total_time = (response_end - packet_start_tick) * portTICK_PERIOD_MS;
+    // ESP_LOGI(TAG, "[PERF] Response sent in %" PRIu32 "ms. TOTAL packet time: %" PRIu32 "ms",
+    //          response_time, total_time);
 }
 
 // *****************************************************************************

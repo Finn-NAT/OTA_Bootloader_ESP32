@@ -301,7 +301,7 @@ def can_send_packet(bus, data):
     for chunk in chunks:
         try:
             bus.send(CAN_TX_ID, bytes(chunk))
-            # time.sleep(0.0001)  # Small delay between frames
+            time.sleep(0.0001)  # Small delay between frames
         except Exception as e:
             error('CAN send error: %s' % str(e))
 
