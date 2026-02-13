@@ -505,4 +505,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-# python btl_host_can.py -f firmware.bin -a 0x110000 -d ESP32S3 -c 0 -b 500000
+# python btl_host_can.py -f app.bin -a 0x110000 -d ESP32S3 -c 0 -b 500000

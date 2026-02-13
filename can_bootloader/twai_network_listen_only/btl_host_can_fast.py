@@ -617,3 +617,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# python btl_host_can_fast.py -f app.bin -a 0x110000 -d ESP32S3 -c 0 -b 500000
