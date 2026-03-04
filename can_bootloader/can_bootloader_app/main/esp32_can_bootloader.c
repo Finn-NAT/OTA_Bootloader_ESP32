@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 // *****************************************************************************
 // Section: Private Variables
@@ -231,16 +232,33 @@ static void hal_log_info(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    esp_log_writev(ESP_LOG_INFO, TAG, fmt, args);
+    char log_buf[256];
+    vsnprintf(log_buf, sizeof(log_buf), fmt, args);
     va_end(args);
+
+    ESP_LOGI(TAG, "%s", log_buf);
 }
 
 static void hal_log_error(const char *fmt, ...)
 {
     va_list args;
     va_start(args, fmt);
-    esp_log_writev(ESP_LOG_ERROR, TAG, fmt, args);
+    char log_buf[256];
+    vsnprintf(log_buf, sizeof(log_buf), fmt, args);
     va_end(args);
+
+    ESP_LOGI(TAG, "%s", log_buf);
+}
+
+static void hal_log_debug(const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    char log_buf[256];
+    vsnprintf(log_buf, sizeof(log_buf), fmt, args);
+    va_end(args);
+
+    ESP_LOGI(TAG, "%s", log_buf);
 }
 
 // *****************************************************************************
@@ -261,6 +279,7 @@ static const can_bl_hal_t s_esp32_hal = {
     .set_boot_partition = hal_set_boot_partition,
     .log_info           = hal_log_info,
     .log_error          = hal_log_error,
+    .log_debug          = hal_log_debug,
 };
 
 // *****************************************************************************

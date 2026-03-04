@@ -11,6 +11,8 @@
 
 #include "can_bootloader.h"
 #include <string.h>
+#include <inttypes.h>
+
 
 // *****************************************************************************
 // Section: Private Constants
@@ -225,6 +227,9 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
         uint32_t size  = ctx->input_buffer[CAN_BL_SIZE_OFFSET];
         uint32_t end   = begin + size;
 
+        hal->log_debug("UNLOCK: begin=0x%" PRIx32 ", size=0x%" PRIx32 ", end=0x%" PRIx32,
+                       begin, size, end);
+
         /* Validate with platform - let HAL decide if addresses are valid */
         if (hal->flash_begin != NULL && hal->flash_begin(begin, size))
         {
@@ -294,13 +299,12 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
             }
             else
             {
-                /* End OTA process - validates the image */
                 if (hal->flash_end != NULL && hal->flash_end())
                 {
                     /* Set boot partition */
                     if (hal->set_boot_partition != NULL && hal->set_boot_partition())
                     {
-                        log_info(hal, "VERIFY: OTA successful");
+                        log_info(hal, "VERIFY: set_boot_partition successful");
                         ctx->ota_started = false;
                         write_response(hal, BL_RESP_CRC_OK);
                     }

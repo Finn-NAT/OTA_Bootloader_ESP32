@@ -207,6 +207,7 @@ typedef struct {
     /* Logging (optional, can be NULL) */
     can_bl_hal_log_t                log_info;
     can_bl_hal_log_t                log_error;
+    can_bl_hal_log_t                log_debug;
 } can_bl_hal_t;
 
 // *****************************************************************************

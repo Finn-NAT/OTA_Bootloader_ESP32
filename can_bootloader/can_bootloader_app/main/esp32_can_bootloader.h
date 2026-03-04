@@ -12,7 +12,7 @@
 #ifndef ESP32_CAN_BOOTLOADER_H
 #define ESP32_CAN_BOOTLOADER_H
 
-#include "can_bootloader.h"
+#include "can_bootloader_lib/can_bootloader.h"
 
 /* ESP-IDF includes */
 #include "freertos/FreeRTOS.h"
