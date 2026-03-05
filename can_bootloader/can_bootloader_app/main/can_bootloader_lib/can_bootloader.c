@@ -235,10 +235,10 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
         {
             ctx->unlock_begin = begin;
             ctx->unlock_end = end;
-            ctx->ota_started = true;
+            ctx->flash_start = true;
             ctx->total_bytes_written = 0;
             write_response(hal, BL_RESP_OK);
-            log_info(hal, "UNLOCK: OTA session started");
+            log_info(hal, "UNLOCK: Flash session started");
         }
         else
         {
@@ -277,9 +277,9 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
     {
         uint32_t crc_expected = ctx->input_buffer[CAN_BL_CRC_OFFSET];
 
-        if (!ctx->ota_started)
+        if (!ctx->flash_start)
         {
-            log_error(hal, "VERIFY: OTA not started");
+            log_error(hal, "VERIFY: Flash not started");
             write_response(hal, BL_RESP_CRC_FAIL);
         }
         else
@@ -294,7 +294,7 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
                 {
                     hal->flash_abort();
                 }
-                ctx->ota_started = false;
+                ctx->flash_start = false;
                 write_response(hal, BL_RESP_CRC_FAIL);
             }
             else
@@ -305,7 +305,7 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
                     if (hal->set_boot_partition != NULL && hal->set_boot_partition())
                     {
                         log_info(hal, "VERIFY: set_boot_partition successful");
-                        ctx->ota_started = false;
+                        ctx->flash_start = false;
                         write_response(hal, BL_RESP_CRC_OK);
                     }
                     else
@@ -317,7 +317,7 @@ static void command_task(can_bl_context_t *ctx, const can_bl_hal_t *hal)
                 else
                 {
                     log_error(hal, "VERIFY: flash_end failed");
-                    ctx->ota_started = false;
+                    ctx->flash_start = false;
                     write_response(hal, BL_RESP_CRC_FAIL);
                 }
             }
@@ -414,7 +414,7 @@ void can_bl_reset(can_bl_context_t *ctx, const can_bl_hal_t *hal)
         return;
     }
 
-    if (ctx->ota_started && hal != NULL && hal->flash_abort != NULL)
+    if (ctx->flash_start && hal != NULL && hal->flash_abort != NULL)
     {
         hal->flash_abort();
     }

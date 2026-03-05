@@ -371,7 +371,7 @@ void esp32_can_bootloader_run(void)
     {
         can_bl_init(&s_bl_context);
         context_initialized = true;
-        ESP_LOGI(TAG, "CAN Bootloader started, waiting for commands...");
+        ESP_LOGI(TAG, "CAN Bootloader started V2.0, waiting for commands...");
     }
     
     /* Run one iteration of the bootloader task */

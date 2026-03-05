@@ -241,7 +241,7 @@ typedef struct {
     /* Bootloader state */
     bool initialized;
     bool active;
-    bool ota_started;
+    bool flash_start;
     
     /* Timing */
     uint32_t last_rx_tick_ms;
