@@ -78,12 +78,14 @@ class CMSG_T(Structure):
 class EsdCanBus:
     """esd CAN-USB interface using NTCAN library"""
     
-    def __init__(self, channel=0, bitrate=500000, rx_queue_size=100, tx_queue_size=100, rx_timeout=100, tx_timeout=1000):
+    def __init__(self, channel=0, bitrate=500000, rx_queue_size=1000, tx_queue_size=100, rx_timeout=50, tx_timeout=1000):
         self.handle = NTCAN_HANDLE()
         self.channel = channel
         self.bitrate = bitrate
         self.rx_timeout = rx_timeout
         self.tx_timeout = tx_timeout
+        self.rx_queue_size = rx_queue_size
+        self.tx_queue_size = tx_queue_size
         
         # Load NTCAN library
         try:
@@ -121,7 +123,11 @@ class EsdCanBus:
         if ret != NTCAN_SUCCESS:
             raise Exception("canOpen failed with error code: 0x%08X" % (ret & 0xFFFFFFFF))
         
-        print(f"[INFO] CAN channel {channel} opened, handle: {self.handle}")
+        print(
+            f"[INFO] CAN channel {channel} opened, handle: {self.handle} "
+            f"(rx_queue={rx_queue_size}, tx_queue={tx_queue_size}, rx_timeout={rx_timeout}ms)",
+            flush=True,
+        )
         
         # Set baudrate
         if bitrate not in BAUDRATE_MAP:
@@ -168,23 +174,22 @@ class EsdCanBus:
         else:
             print(f"[INFO] Enabled CAN ID: 0x{can_id:08X}")
     
-    def receive(self, timeout_ms=None):
-        """Receive CAN messages (blocking with timeout)
+    def receive(self, max_messages=256):
+        """Receive CAN messages (blocking with configured timeout)
         
         Returns:
             List of received messages, each as dict with 'id', 'data', 'len', 'extended'
             Returns empty list on timeout
         """
-        msgs = (CMSG_T * 100)()  # Buffer for up to 10 messages
-        count = c_int32(100)
-        
-        if timeout_ms is not None:
-            # Use canTake for non-blocking
-            ret = self.ntcan.canTake(self.handle, msgs, byref(count))
-        else:
-            # Use canRead for blocking
-            overlapped = c_int32(0)
-            ret = self.ntcan.canRead(self.handle, msgs, byref(count), byref(overlapped))
+        if max_messages < 1:
+            return []
+
+        # Buffer for up to max_messages messages
+        msgs = (CMSG_T * max_messages)()
+        count = c_int32(max_messages)
+
+        # Use canRead for blocking read; pass NULL for overlapped (sync mode)
+        ret = self.ntcan.canRead(self.handle, msgs, byref(count), None)
         
         if ret == NTCAN_RX_TIMEOUT:
             return []
@@ -207,6 +212,7 @@ class EsdCanBus:
                 'data': bytes(msg.data[:msg.len]),
                 'len': msg.len,
                 'extended': extended
+                ,'msg_lost': int(msg.msg_lost)
             })
         
         return result
@@ -233,9 +239,22 @@ class CanDebugMonitor:
         self.buffer = bytearray()
         self.last_rx_time = time.time()
         self.msg_timeout = 0.1  # 100ms timeout to flush buffer
+        self.total_frames = 0
+        self.total_lost_flags = 0
     
     def process_message(self, msg):
         """Process a received CAN debug message"""
+        self.total_frames += 1
+
+        # NTCAN provides a msg_lost flag when RX queue overflow/drop happened.
+        if msg.get('msg_lost', 0):
+            self.total_lost_flags += 1
+            print(
+                f"[WARNING] Driver reported msg_lost=1 on frame #{self.total_frames} "
+                f"(lost_flags_total={self.total_lost_flags})",
+                flush=True,
+            )
+
         if msg['id'] != self.debug_id:
             return
         
@@ -310,6 +329,14 @@ Examples:
                         help='Show timestamp with each message')
     parser.add_argument('--id', type=str, default=None,
                         help=f'Custom CAN ID to listen (default: 0x{CAN_DEBUG_ID:08X})')
+    parser.add_argument('--rx-queue', type=int, default=5000,
+                        help='NTCAN RX queue size (default: 5000). Increase if you see msg loss during bursts.')
+    parser.add_argument('--rx-timeout', type=int, default=20,
+                        help='NTCAN RX timeout in ms for canRead (default: 20). Smaller = more responsive draining.')
+    parser.add_argument('--batch', type=int, default=256,
+                        help='Max CAN frames per read call (default: 256).')
+    parser.add_argument('--idle-sleep-ms', type=float, default=1.0,
+                        help='Sleep/yield time (ms) when no CAN frames received (default: 1.0).')
     
     args = parser.parse_args()
     
@@ -342,7 +369,8 @@ Examples:
         can = EsdCanBus(
             channel=args.channel,
             bitrate=args.baudrate,
-            rx_timeout=100  # 100ms receive timeout for responsive monitoring
+            rx_queue_size=args.rx_queue,
+            rx_timeout=args.rx_timeout,
         )
         
         # Enable the debug CAN ID (with extended flag)
@@ -361,7 +389,7 @@ Examples:
         # Main receive loop
         while True:
             try:
-                messages = can.receive()
+                messages = can.receive(max_messages=args.batch)
                 
                 for msg in messages:
                     monitor.process_message(msg)
@@ -369,8 +397,9 @@ Examples:
                 # Check for timeout flush
                 monitor.check_timeout()
                 
-                # Small sleep to prevent CPU hogging
-                time.sleep(0.001)
+                # Yield CPU on idle; some Windows setups need this for stable RX dispatch.
+                if not messages and args.idle_sleep_ms is not None and args.idle_sleep_ms > 0:
+                    time.sleep(args.idle_sleep_ms / 1000.0)
                 
             except KeyboardInterrupt:
                 break
